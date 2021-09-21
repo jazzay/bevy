@@ -1485,4 +1485,64 @@ mod tests {
             "new entity was spawned and received C component"
         );
     }
+
+	#[test]
+	fn dynamic_component_duplicate_mismatch() {
+		let mut world = World::new();
+		let dynamic_id = 123456;
+
+		let layout = std::alloc::Layout::new::<A>();	// for dyn comps we would build this externally
+		let descriptor_dynamic = ComponentDescriptor::new_dynamic(
+			"bevy_ecs::tests::A", dynamic_id, layout, StorageType::SparseSet);
+		world.register_component(descriptor_dynamic).unwrap();
+	
+		// Try to register another dynamic component with same custom ID but diff layout/name
+		let layout2 = std::alloc::Layout::new::<B>();	// for dyn comps we would build this externally
+		let descriptor_dynamic2 = ComponentDescriptor::new_dynamic(
+			"bevy_ecs::tests::B", dynamic_id, layout2, StorageType::SparseSet);
+		let result = world.register_component(descriptor_dynamic2);
+		assert!(result.is_err(), "dynamic component mismatch");		// should fail
+	}
+
+	#[test]
+	fn dynamic_component_becomes_typed() {
+		let mut world = World::new();
+		let layout = std::alloc::Layout::new::<A>();	// for dyn comps we would build this externally
+		let descriptor_dynamic = ComponentDescriptor::new_dynamic(
+			"bevy_ecs::tests::A", 123456, layout, StorageType::SparseSet);
+		let component_id_dynamic = world.register_component(descriptor_dynamic).unwrap();
+	
+		let descriptor_typed = ComponentDescriptor::new::<A>(StorageType::SparseSet);
+		let component_id_typed = world.register_component(descriptor_typed).unwrap();
+		assert_eq!(component_id_dynamic, component_id_typed, "dynamic component can become typed");
+	}
+	
+	#[test]
+	fn typed_component_becomes_dynamic() {
+		let mut world = World::new();
+		let descriptor_typed = ComponentDescriptor::new::<A>(StorageType::SparseSet);
+		let component_id_typed = world.register_component(descriptor_typed).unwrap();
+	
+		let layout = std::alloc::Layout::new::<A>();	// for dyn comps we would build this externally
+		let descriptor_dynamic = ComponentDescriptor::new_dynamic(
+			"bevy_ecs::tests::A", 123456, layout, StorageType::SparseSet);
+		let component_id_dynamic = world.register_component(descriptor_dynamic).unwrap();
+		assert_eq!(component_id_typed, component_id_dynamic);
+	}
+	
+	#[test]
+	fn custom_component_matches_dynamic_and_typed() {
+		let mut world = World::new();
+		let descriptor_custom = ComponentDescriptor::new_with_custom_id::<A>(123456, StorageType::SparseSet);
+		let component_id_custom = world.register_component(descriptor_custom).unwrap();
+	
+		let layout = std::alloc::Layout::new::<A>();	// for dyn comps we would build this externally
+		let descriptor_dynamic = ComponentDescriptor::new_dynamic("bevy_ecs::tests::A", 123456, layout, StorageType::SparseSet);
+		let component_id_dynamic = world.register_component(descriptor_dynamic).unwrap();
+		assert_eq!(component_id_custom, component_id_dynamic);
+	
+		let descriptor_typed = ComponentDescriptor::new::<A>(StorageType::SparseSet);
+		let component_id_typed = world.register_component(descriptor_typed).unwrap();
+		assert_eq!(component_id_typed, component_id_dynamic);
+	}
 }

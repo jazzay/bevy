@@ -131,6 +131,7 @@ pub struct ComponentDescriptor {
     // actually Send + Sync
     is_send_and_sync: bool,
     type_id: Option<TypeId>,
+    custom_id: Option<u64>,
     layout: Layout,
     drop: unsafe fn(*mut u8),
 }
@@ -141,12 +142,17 @@ impl ComponentDescriptor {
         x.cast::<T>().drop_in_place()
     }
 
+    unsafe fn drop_ptr_dynamic(_x: *mut u8) {
+		// noop
+    }
+
     pub fn new<T: Component>(storage_type: StorageType) -> Self {
         Self {
             name: std::any::type_name::<T>().to_string(),
             storage_type,
             is_send_and_sync: true,
             type_id: Some(TypeId::of::<T>()),
+			custom_id: None,
             layout: Layout::new::<T>(),
             drop: Self::drop_ptr::<T>,
         }
@@ -158,8 +164,35 @@ impl ComponentDescriptor {
             storage_type,
             is_send_and_sync: false,
             type_id: Some(TypeId::of::<T>()),
+			custom_id: None,
             layout: Layout::new::<T>(),
             drop: Self::drop_ptr::<T>,
+        }
+    }
+
+	// for registering components with a custom type id
+    pub fn new_with_custom_id<T: Component>(custom_id: u64, storage_type: StorageType) -> Self {
+        Self {
+            name: std::any::type_name::<T>().to_string(),
+            storage_type,
+            is_send_and_sync: true,
+            type_id: Some(TypeId::of::<T>()),
+			custom_id: Some(custom_id),
+            layout: Layout::new::<T>(),
+            drop: Self::drop_ptr::<T>,
+        }
+    }
+
+	// for registering component types that do not exist at compile time
+    pub fn new_dynamic(name: &str, dynamic_id: u64, layout: Layout, storage_type: StorageType) -> Self {
+        Self {
+            name: name.to_string(),
+            storage_type,
+            is_send_and_sync: true,
+            type_id: None,
+			custom_id: Some(dynamic_id),
+            layout,
+            drop: Self::drop_ptr_dynamic,
         }
     }
 
@@ -184,12 +217,16 @@ pub struct Components {
     components: Vec<ComponentInfo>,
     indices: std::collections::HashMap<TypeId, usize, fxhash::FxBuildHasher>,
     resource_indices: std::collections::HashMap<TypeId, usize, fxhash::FxBuildHasher>,
+    custom_indices: std::collections::HashMap<u64, usize, fxhash::FxBuildHasher>,
+    names: std::collections::HashMap<String, usize, fxhash::FxBuildHasher>,
 }
 
 #[derive(Debug, Error)]
 pub enum ComponentsError {
     #[error("A component of type {name:?} ({type_id:?}) already exists")]
     ComponentAlreadyExists { type_id: TypeId, name: String },
+    #[error("A dynamic component of type {name:?} ({custom_id:?}) already exists")]
+    DynamicComponentAlreadyExists { custom_id: u64, name: String },
 }
 
 impl Components {
@@ -200,14 +237,60 @@ impl Components {
         let index = self.components.len();
         if let Some(type_id) = descriptor.type_id {
             let index_entry = self.indices.entry(type_id);
-            if let Entry::Occupied(_) = index_entry {
-                return Err(ComponentsError::ComponentAlreadyExists {
-                    type_id,
-                    name: descriptor.name,
-                });
-            }
+            if let Entry::Occupied(current) = index_entry {
+                return Ok(ComponentId(*current.get()));
+            } else {
+				// see if we registered a dynamic type already
+				let index_entry = self.names.entry(descriptor.name.clone());
+				if let Entry::Occupied(current) = index_entry {
+					// update type information 
+					let info = self.components.get_mut(*current.get()).unwrap();
+					info.descriptor.type_id = Some(type_id);
+					info.descriptor.drop = descriptor.drop;	// take typed drop
+					self.indices.insert(type_id, *current.get());
+					return Ok(ComponentId(*current.get()));
+				}
+			}
+
+			// Completely new
             self.indices.insert(type_id, index);
-        }
+            self.names.insert(descriptor.name.clone(), index);
+
+        } else if let Some(custom_id) = descriptor.custom_id {
+			// see if we can find an existing registration that matches the dynamic type name
+            let index_entry = self.names.entry(descriptor.name.clone());
+            if let Entry::Occupied(current) = index_entry {
+				let info = self.components.get_mut(*current.get()).unwrap();
+				if info.descriptor.custom_id.is_none() {
+					// add the custom id if first time
+					info.descriptor.custom_id = Some(custom_id);
+					self.custom_indices.insert(custom_id, *current.get());
+
+				} else {
+					assert!(info.descriptor.custom_id == Some(custom_id));
+				}
+
+                return Ok(ComponentId(*current.get()));
+            }
+		}
+		
+		if let Some(custom_id) = descriptor.custom_id {
+            let index_entry = self.custom_indices.entry(custom_id);
+            if let Entry::Occupied(current) = index_entry {
+				// ensure it matches the registered custom descriptor
+				let info = self.components.get_mut(*current.get()).unwrap();
+				if info.descriptor.name != descriptor.name || info.descriptor.layout != descriptor.layout {
+					return Err(ComponentsError::DynamicComponentAlreadyExists {
+						custom_id,
+						name: descriptor.name,
+					});					
+				}
+                return Ok(ComponentId(*current.get()));
+            }
+            self.custom_indices.insert(custom_id, index);
+            self.names.insert(descriptor.name.clone(), index);
+		}
+
         self.components
             .push(ComponentInfo::new(ComponentId(index), descriptor));
 
